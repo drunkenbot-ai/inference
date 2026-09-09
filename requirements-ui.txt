@@ -1,0 +1,2 @@
+# Desktop Qt UI dependencies
+PySide6>=6.5.0
