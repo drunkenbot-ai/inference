@@ -4,8 +4,18 @@ import re
 from typing import Callable, Optional
 from urllib.parse import unquote
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QKeyEvent
+from PySide6.QtCore import QSize, QTimer, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QKeyEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -16,6 +26,54 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+def create_action_icon(action: str, size: int = 20) -> QIcon:
+    """Create a clean vector icon for message bubble action buttons."""
+    icon = QIcon()
+    for state_name, color in (("normal", "#c0c0c0"), ("checked", "#151515")):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(color), 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+
+        if action == "copy":
+            painter.drawRoundedRect(3, 3, 10, 11, 1.5, 1.5)
+            painter.drawRoundedRect(7, 6, 10, 11, 1.5, 1.5)
+        elif action in ("send", "resend"):
+            path = QPainterPath()
+            path.moveTo(3, 10)
+            path.lineTo(17, 3)
+            path.lineTo(11, 17)
+            path.lineTo(9, 11)
+            path.closeSubpath()
+            painter.drawPath(path)
+            painter.drawLine(17, 3, 9, 11)
+        elif action == "raw":
+            path = QPainterPath()
+            # <
+            path.moveTo(6, 6)
+            path.lineTo(3, 10)
+            path.lineTo(6, 14)
+            # /
+            path.moveTo(8, 15)
+            path.lineTo(12, 5)
+            # >
+            path.moveTo(14, 6)
+            path.lineTo(17, 10)
+            path.lineTo(14, 14)
+            painter.drawPath(path)
+
+        painter.end()
+        mode = QIcon.Normal
+        state = QIcon.On if state_name == "checked" else QIcon.Off
+        icon.addPixmap(pixmap, mode, state)
+
+    return icon
 
 
 class ChatInputEdit(QTextEdit):
@@ -65,6 +123,7 @@ class ChatMessageWidget(QWidget):
         super().__init__()
         self.role = role
         self.content = content
+        self._is_raw: bool = False
         self.html_renderer = html_renderer
         self.resend_callback = resend_callback
         self.resend_prompt = resend_prompt or content
@@ -115,26 +174,49 @@ class ChatMessageWidget(QWidget):
 
         footer = QHBoxLayout()
         footer.setContentsMargins(6, 0, 6, 0)
-        self.copy_button = QPushButton("Copy")
+        footer.setSpacing(4)
+
+        self.copy_button = QPushButton()
+        self.copy_button.setIcon(create_action_icon("copy"))
+        self.copy_button.setIconSize(QSize(16, 16))
+        self.copy_button.setFixedSize(26, 24)
         self.copy_button.setObjectName("MessageAction")
-        self.copy_button.setFixedWidth(28)
-        self.copy_button.setToolTip("Copy this message.")
-        self.copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self.browser.toPlainText()))
-        self.resend_button = QPushButton("Resend")
+        self.copy_button.setToolTip("Copy message")
+        self.copy_button.setCursor(Qt.PointingHandCursor)
+        self.copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self.content if self._is_raw else self.browser.toPlainText()))
+
+        self.resend_button = QPushButton()
+        self.resend_button.setIcon(create_action_icon("send"))
+        self.resend_button.setIconSize(QSize(16, 16))
+        self.resend_button.setFixedSize(26, 24)
         self.resend_button.setObjectName("MessageAction")
-        self.resend_button.setFixedWidth(28)
-        self.resend_button.setToolTip("Send this message again.")
+        self.resend_button.setToolTip("Send this message again")
+        self.resend_button.setCursor(Qt.PointingHandCursor)
         self.resend_button.clicked.connect(lambda: self.resend_callback(self.resend_prompt))
+
+        self.raw_button = QPushButton()
+        self.raw_button.setIcon(create_action_icon("raw"))
+        self.raw_button.setIconSize(QSize(16, 16))
+        self.raw_button.setFixedSize(26, 24)
+        self.raw_button.setObjectName("MessageAction")
+        self.raw_button.setCheckable(True)
+        self.raw_button.setToolTip("Toggle raw format")
+        self.raw_button.setCursor(Qt.PointingHandCursor)
+        self.raw_button.toggled.connect(self._toggle_raw)
+
         self.meta_label = QLabel(metrics)
         self.meta_label.setObjectName("MessageMeta")
         self.meta_label.setVisible(bool(metrics))
+
         if role == "user":
             footer.addStretch(1)
             footer.addWidget(self.copy_button)
             footer.addWidget(self.resend_button)
+            footer.addWidget(self.raw_button)
         else:
             footer.addWidget(self.copy_button)
             footer.addWidget(self.resend_button)
+            footer.addWidget(self.raw_button)
             footer.addWidget(self.meta_label)
             footer.addStretch(1)
         stack_layout.addLayout(footer)
@@ -147,6 +229,15 @@ class ChatMessageWidget(QWidget):
             row_layout.addStretch(1)
 
         self.set_content(content)
+
+    def _toggle_raw(self, checked: bool) -> None:
+        """Toggle raw vs rendered markdown presentation."""
+        self._is_raw = checked
+        if checked:
+            self.raw_button.setToolTip("Show rendered markdown")
+        else:
+            self.raw_button.setToolTip("Toggle raw format")
+        self._update_display()
 
     def _toggle_thought(self) -> None:
         """Toggle visibility of the internal reasoning trace."""
@@ -163,18 +254,33 @@ class ChatMessageWidget(QWidget):
         Args:
             content: Markdown message content.
         """
-
         self.content = content
+        self._update_display()
+
+    def _update_display(self) -> None:
+        """Render either raw plain text or formatted markdown according to toggle."""
+        if self._is_raw:
+            if hasattr(self, "thought_toggle"):
+                self.thought_toggle.setVisible(False)
+            if hasattr(self, "thought_browser"):
+                self.thought_browser.setVisible(False)
+            self.browser.setFont(QFont("Consolas", 10))
+            self.browser.setPlainText(self.content)
+            self._fit_browser()
+            self.updateGeometry()
+            return
+
+        self.browser.setFont(QFont("Arial", 10))
         thought_match = re.search(
             r"<(?:thought|think)>(.*?)(?:<\/(?:thought|think)>|$)",
-            content,
+            self.content,
             flags=re.DOTALL,
         )
         if thought_match and self.role == "assistant":
             thought_text = thought_match.group(1).strip()
-            close_match = re.search(r"<\/(?:thought|think)>", content)
+            close_match = re.search(r"<\/(?:thought|think)>", self.content)
             if close_match:
-                reply_text = content[close_match.end() :].strip()
+                reply_text = self.content[close_match.end() :].strip()
             else:
                 reply_text = ""
 
@@ -192,14 +298,14 @@ class ChatMessageWidget(QWidget):
             display_content = (
                 reply_text
                 if reply_text
-                else ("_Thinking in progress..._" if "<thought>" in content or "<think>" in content else content)
+                else ("_Thinking in progress..._" if "<thought>" in self.content or "<think>" in self.content else self.content)
             )
         else:
             if hasattr(self, "thought_toggle"):
                 self.thought_toggle.setVisible(False)
             if hasattr(self, "thought_browser"):
                 self.thought_browser.setVisible(False)
-            display_content = content
+            display_content = self.content
 
         self.browser.setHtml(self.html_renderer(display_content))
         self._fit_browser()
@@ -218,7 +324,10 @@ class ChatMessageWidget(QWidget):
     def _fit_browser(self) -> None:
         """Resize message body to content."""
 
-        self.browser.setFont(QFont("Arial", 10))
+        if getattr(self, "_is_raw", False):
+            self.browser.setFont(QFont("Consolas", 10))
+        else:
+            self.browser.setFont(QFont("Arial", 10))
         self.browser.document().setDocumentMargin(0)
         text = self.browser.toPlainText()
         lines = text.splitlines() or [text]

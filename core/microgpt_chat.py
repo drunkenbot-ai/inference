@@ -48,9 +48,11 @@ class MicroGPTChatSession:
         if not tokenizer_path.exists():
             # Training checkpoints are stored in a child checkpoints folder,
             # while the tokenizer is copied to the training output directory.
-            output_tokenizer = self.model_dir.parent / "tokenizer.json"
-            if output_tokenizer.exists():
-                tokenizer_path = output_tokenizer
+            for cand_dir in (self.model_dir.parent, self.model_dir.parent.parent):
+                cand_tok = cand_dir / "tokenizer.json"
+                if cand_tok.exists():
+                    tokenizer_path = cand_tok
+                    break
 
         if not tokenizer_path.exists():
             raise FileNotFoundError(
@@ -66,8 +68,36 @@ class MicroGPTChatSession:
             self.device = "cpu"
 
         checkpoint = torch.load(self.model_path, map_location=self.device)
-        config_data = checkpoint.get("model_config")
-        state_dict = checkpoint.get("model_state_dict")
+        config_data = checkpoint.get("model_config") if isinstance(checkpoint, dict) else None
+        state_dict = checkpoint.get("model_state_dict") if isinstance(checkpoint, dict) else None
+
+        # Resilient fallback: Check if checkpoint is a legacy raw state dict
+        if state_dict is None and isinstance(checkpoint, dict) and any(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+            state_dict = checkpoint
+            # Try to recover model_config from sibling or parent metadata
+            if not isinstance(config_data, dict):
+                candidates = [
+                    self.model_dir / "training_summary.json",
+                    self.model_dir.parent / "training_summary.json",
+                    self.model_dir.parent.parent / "training_summary.json",
+                    self.model_dir / "project.json",
+                    self.model_dir.parent / "project.json",
+                    self.model_dir.parent.parent / "project.json",
+                ]
+                for cand in candidates:
+                    if cand.exists():
+                        try:
+                            with open(cand, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            m_cfg = data.get("model_config")
+                            if isinstance(m_cfg, str):
+                                m_cfg = json.loads(m_cfg)
+                            if isinstance(m_cfg, dict) and ("embedding_size" in m_cfg or "vocab_size" in m_cfg):
+                                config_data = m_cfg
+                                break
+                        except Exception:
+                            pass
+
         if not isinstance(config_data, dict) or not state_dict:
             raise ValueError("Checkpoint must contain model_config and model_state_dict.")
         self.config = ModelConfig(**config_data)
