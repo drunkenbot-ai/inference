@@ -110,6 +110,8 @@ def evaluate_checkpoint(
             progress({"message": f"Benchmark prompt {index}/{len(prompts)}...", "percent": int(90 * (index - 1) / max(len(prompts), 1))})
         prompt_started = perf_counter()
         input_ids = tokenizer.encode(prompt).ids
+        while input_ids and input_ids[-1] == eos_id:
+            input_ids.pop()
         context = torch.tensor([input_ids], dtype=torch.long, device=device)
         generated = model.generate(
             context,

@@ -20,6 +20,8 @@ STOP_SEQUENCES = (
     "\nSystem:",
     "\nHuman:",
     "\nAssistant:",
+    "\nInstruction:",
+    "\nResponse:",
     "</tool_calls>",
     "</CALL>",
     "<|endoftext|>",
@@ -101,6 +103,30 @@ class MicroGPTChatSession:
         if not isinstance(config_data, dict) or not state_dict:
             raise ValueError("Checkpoint must contain model_config and model_state_dict.")
         self.config = ModelConfig(**config_data)
+
+        # Check if the checkpoint contains LoRA adapter weights (e.g. unmerged checkpoint)
+        is_lora = (
+            checkpoint.get("peft_method") == "lora"
+            or any(".lora_a" in k or ".base.weight" in k for k in state_dict.keys())
+        )
+        if is_lora:
+            from engine.model_norm_lora import apply_lora_adapters, merged_lora_state_dict
+
+            lora_cfg = checkpoint.get("lora_config") or {}
+            inferred_rank = next(
+                (v.shape[0] for k, v in state_dict.items() if ".lora_a" in k and hasattr(v, "shape")),
+                8,
+            )
+            rank = int(lora_cfg.get("rank") or inferred_rank)
+            alpha = float(lora_cfg.get("alpha") or (2 * rank))
+            dropout = float(lora_cfg.get("dropout") or 0.0)
+            target_modules = lora_cfg.get("target_modules") or "all"
+
+            temp_model = MicroGPT(self.config)
+            apply_lora_adapters(temp_model, rank=rank, alpha=alpha, dropout=dropout, target_modules=target_modules)
+            temp_model.load_state_dict(state_dict)
+            state_dict = merged_lora_state_dict(temp_model)
+
         self.model = MicroGPT(self.config).to(self.device)
         self.model.load_state_dict(state_dict)
         self.model.eval()
@@ -176,7 +202,10 @@ class MicroGPTChatSession:
                 max_tokens=max_tokens,
                 enable_tools=enable_tools,
             )
-            input_ids = self.tokenizer.encode(prompt_text).ids[-self.config.context_length :]
+            raw_input_ids = self.tokenizer.encode(prompt_text).ids
+            while raw_input_ids and raw_input_ids[-1] == self.eos_id:
+                raw_input_ids.pop()
+            input_ids = raw_input_ids[-self.config.context_length :]
             ids = torch.tensor([input_ids], dtype=torch.long, device=self.device)
 
             current_hop = 0
@@ -277,6 +306,8 @@ class MicroGPTChatSession:
                                     "tokens_per_second": total_generated_tokens / max(perf_counter() - started_at, 0.001),
                                 })
                             obs_ids = self.tokenizer.encode(obs_block).ids
+                            while obs_ids and obs_ids[-1] == self.eos_id:
+                                obs_ids.pop()
                             ids = torch.cat((ids, torch.tensor([obs_ids], dtype=torch.long, device=self.device)), dim=1)
                         continue
 
@@ -412,12 +443,31 @@ def _resolve_model_checkpoint(path: Path) -> Path:
 
     path = Path(path)
     if path.is_dir():
-        final_model = path / "final_model.pt"
-        if final_model.exists():
-            return final_model
-        checkpoints = sorted((path / "checkpoints").glob("checkpoint_*.pt"), key=lambda item: item.stat().st_mtime, reverse=True)
-        if checkpoints:
-            return checkpoints[0]
+        for candidate_name in (
+            "final_model.pt",
+            "model.pt",
+            "best_checkpoint.pt",
+            "checkpoint_best_val.pt",
+            "latest_checkpoint.pt",
+        ):
+            cand = path / candidate_name
+            if cand.exists():
+                return cand
+        checkpoints_dir = path / "checkpoints"
+        if checkpoints_dir.is_dir():
+            for candidate_name in (
+                "final_model.pt",
+                "model.pt",
+                "best_checkpoint.pt",
+                "checkpoint_best_val.pt",
+                "latest_checkpoint.pt",
+            ):
+                cand = checkpoints_dir / candidate_name
+                if cand.exists():
+                    return cand
+            checkpoints = sorted(checkpoints_dir.glob("checkpoint_*.pt"), key=lambda item: item.stat().st_mtime, reverse=True)
+            if checkpoints:
+                return checkpoints[0]
     if path.exists() and path.suffix == ".pt":
         return path
     raise FileNotFoundError(f"MicroGPT checkpoint not found: {path}")
