@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    Qt,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -18,6 +24,89 @@ from PySide6.QtWidgets import (
 from .chat_widgets import ChatInputEdit
 
 
+# ---------------------------------------------------------------------------
+# Collapsible sidebar wrapper
+# ---------------------------------------------------------------------------
+
+class _SidePanel(QWidget):
+    """A slide-in / slide-out panel driven by a thin toggle bar."""
+
+    _COLLAPSED_WIDTH = 0
+    _EXPANDED_WIDTH = 380
+    _TOGGLE_BAR_WIDTH = 28
+    _ANIMATION_MS = 280
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # --- toggle bar (always visible) ---
+        self._bar = QFrame()
+        self._bar.setObjectName("SidePanelBar")
+        self._bar.setFixedWidth(self._TOGGLE_BAR_WIDTH)
+        self._bar.setCursor(Qt.PointingHandCursor)
+        self._bar.mousePressEvent = lambda _e: self.toggle()
+
+        bar_layout = QVBoxLayout(self._bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(0)
+        bar_layout.addStretch(1)
+        self._bar_label = QLabel("⚙")
+        self._bar_label.setObjectName("SidePanelIcon")
+        self._bar_label.setAlignment(Qt.AlignCenter)
+        bar_layout.addWidget(self._bar_label)
+        self._bar_text = QLabel("S\nE\nT\nT\nI\nN\nG\nS")
+        self._bar_text.setObjectName("SidePanelText")
+        self._bar_text.setAlignment(Qt.AlignCenter)
+        bar_layout.addWidget(self._bar_text)
+        bar_layout.addStretch(1)
+
+        # --- content area (collapsible) ---
+        self._content = QWidget()
+        self._content.setObjectName("SidePanelContent")
+        self._content.setMaximumWidth(self._COLLAPSED_WIDTH)
+        self._content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(10, 10, 10, 10)
+        self._content_layout.setSpacing(12)
+
+        root.addWidget(self._bar)
+        root.addWidget(self._content)
+
+        self._expanded = False
+        self._animation: QPropertyAnimation | None = None
+
+    # -- public API --
+
+    @property
+    def content_layout(self) -> QVBoxLayout:
+        """Layout where caller adds cards."""
+        return self._content_layout
+
+    def toggle(self) -> None:
+        """Slide open or closed."""
+        target = self._EXPANDED_WIDTH if not self._expanded else self._COLLAPSED_WIDTH
+        self._expanded = not self._expanded
+
+        if self._animation and self._animation.state() == QPropertyAnimation.Running:
+            self._animation.stop()
+
+        self._animation = QPropertyAnimation(self._content, b"maximumWidth")
+        self._animation.setDuration(self._ANIMATION_MS)
+        self._animation.setStartValue(self._content.maximumWidth())
+        self._animation.setEndValue(target)
+        self._animation.setEasingCurve(QEasingCurve.InOutCubic)
+        self._animation.start()
+
+
+# ---------------------------------------------------------------------------
+# build_chat_tab
+# ---------------------------------------------------------------------------
+
 def build_chat_tab(window) -> QWidget:
     """Build the GGUF model test chat page.
 
@@ -31,7 +120,7 @@ def build_chat_tab(window) -> QWidget:
     layout.setSpacing(12)
 
     main = QHBoxLayout()
-    main.setSpacing(14)
+    main.setSpacing(0)
 
     chat_column = QVBoxLayout()
     chat_column.setSpacing(10)
@@ -79,12 +168,9 @@ def build_chat_tab(window) -> QWidget:
     prompt_row.addWidget(window.stop_chat_button)
     chat_column.addLayout(prompt_row)
 
-    settings_column = QVBoxLayout()
-    settings_column.setSpacing(12)
-    settings_panel = QWidget()
-    settings_panel.setMaximumWidth(390)
-    settings_panel.setMinimumWidth(340)
-    settings_panel.setLayout(settings_column)
+    # ---- Settings sidebar (collapsed by default) ----
+    side_panel = _SidePanel()
+    window._chat_side_panel = side_panel
 
     model_form = QFormLayout()
     window._configure_form(model_form)
@@ -158,13 +244,13 @@ def build_chat_tab(window) -> QWidget:
     system_layout = QVBoxLayout()
     system_layout.addWidget(window.system_prompt)
 
-    settings_column.addWidget(window._card("MODEL LOADER", model_form))
-    settings_column.addWidget(window._card("RESPONSE TUNING", sample_form))
-    settings_column.addWidget(window._card("SYSTEM PROMPT", system_layout))
-    settings_column.addStretch(1)
+    side_panel.content_layout.addWidget(window._card("MODEL LOADER", model_form))
+    side_panel.content_layout.addWidget(window._card("RESPONSE TUNING", sample_form))
+    side_panel.content_layout.addWidget(window._card("SYSTEM PROMPT", system_layout))
+    side_panel.content_layout.addStretch(1)
 
     main.addLayout(chat_column, 1)
-    main.addWidget(settings_panel)
+    main.addWidget(side_panel)
     layout.addLayout(main, 1)
 
     window.chat_progress = window._thin_progress()
