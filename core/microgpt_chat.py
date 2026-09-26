@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from threading import Lock
 from time import perf_counter
 from typing import Any, Callable, Optional
@@ -130,7 +131,8 @@ class MicroGPTChatSession:
         self.model = MicroGPT(self.config).to(self.device)
         self.model.load_state_dict(state_dict)
         self.model.eval()
-        self.tokenizer = load_tokenizer(tokenizer_path)
+        _loader = getattr(sys.modules.get("engine.microgpt_chat"), "load_tokenizer", load_tokenizer)
+        self.tokenizer = _loader(tokenizer_path)
         self.eos_id = token_id(self.tokenizer, EOS_TOKEN)
         self._lock = Lock()
         self._messages: list[dict[str, str]] = []
